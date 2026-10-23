@@ -79,6 +79,15 @@ val PALETTES = listOf(
 )
 fun palette(id: String?) = PALETTES.firstOrNull { it.id == id } ?: PALETTES[0]
 
+/** UI language switch, same as App.kt: Japanese when the user chose it, Chinese otherwise. */
+private fun T(zh: String, ja: String) = if (Prefs.prefs.lang == Prefs.LANG_JA) ja else zh
+
+/** The caption palette names in Japanese (labels are kept Chinese in [PALETTES]; ids stay stable). */
+fun paletteLabelJa(id: String) = when (id) {
+    "ink" -> "墨色"; "white" -> "クラシック白"; "yellow" -> "シネマ黄"; "mint" -> "ミント緑"
+    "sky" -> "スカイ青"; "sakura" -> "桜ピンク"; "paper" -> "白地に黒文字"; else -> ""
+}
+
 const val MIN_SP = 5f
 const val MAX_SP = 36f
 /** The phone's sp → points on the desktop: the same number reads about as large at a desk as on the phone in the hand. */
@@ -238,24 +247,24 @@ private fun Toolbar(o: OverlayState, prefs: Prefs, onLock: () -> Unit, onStop: (
     Column(modifier.background(Color(0xF526262B), RoundedCornerShape(10.dp)).border(0.5.dp, Color(0x1AFFFFFF), RoundedCornerShape(10.dp))
         .padding(horizontal = 4.dp, vertical = 2.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            tag("字号"); btn("A−") { prefs.textSp = (prefs.textSp - 2).coerceIn(MIN_SP, MAX_SP) }
+            tag(T("字号", "文字サイズ")); btn("A−") { prefs.textSp = (prefs.textSp - 2).coerceIn(MIN_SP, MAX_SP) }
             btn("A+") { prefs.textSp = (prefs.textSp + 2).coerceIn(MIN_SP, MAX_SP) }
             sep()
-            tag("背景"); btn("−") { prefs.bgAlpha = (prefs.bgAlpha - 0.15f).coerceIn(0f, 1f) }
+            tag(T("背景", "背景")); btn("−") { prefs.bgAlpha = (prefs.bgAlpha - 0.15f).coerceIn(0f, 1f) }
             btn("+") { prefs.bgAlpha = (prefs.bgAlpha + 0.15f).coerceIn(0f, 1f) }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            btn(if (prefs.finalOnly) "说完再出" else "边听边出") { prefs.finalOnly = !prefs.finalOnly }
+            btn(if (prefs.finalOnly) T("说完再出", "言い終わってから") else T("边听边出", "聞きながら")) { prefs.finalOnly = !prefs.finalOnly }
             sep()
-            sw("原文", prefs.showJa) { prefs.showJa = !prefs.showJa }
-            sw("用时", prefs.showStats) { prefs.showStats = !prefs.showStats }
+            sw(T("原文", "原文"), prefs.showJa) { prefs.showJa = !prefs.showJa }
+            sw(T("用时", "所用時間"), prefs.showStats) { prefs.showStats = !prefs.showStats }
             sep()
-            if (!CaptionService.endedState.value) btn(if (CaptionService.pausedState.value) "继续" else "暂停") { CaptionService.togglePause() }
-            btn("锁定", onClick = onLock)
+            if (!CaptionService.endedState.value) btn(if (CaptionService.pausedState.value) T("继续", "再開") else T("暂停", "一時停止")) { CaptionService.togglePause() }
+            btn(T("锁定", "ロック"), onClick = onLock)
             btn("✕", Color(0xFFF28B82), onStop)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            light("翻译", o.mtLight.value, o.mtReason.value); sep(); light("Jev", o.jevLight.value, o.jevReason.value)
+            light(T("翻译", "翻訳"), o.mtLight.value, o.mtReason.value); sep(); light("Jev", o.jevLight.value, o.jevReason.value)
         }
     }
 }
@@ -390,7 +399,7 @@ fun OverlayWindow(o: OverlayState, prefs: Prefs, onStop: () -> Unit) {
         withFrameNanos {}; withFrameNanos {}
         anchor(); save()
     }
-    Window(onCloseRequest = onStop, state = state, title = "同传字幕 · 字幕", undecorated = true, transparent = true,
+    Window(onCloseRequest = onStop, state = state, title = T("同传字幕 · 字幕", "同伝字幕 · 字幕"), undecorated = true, transparent = true,
         alwaysOnTop = true, resizable = false, focusable = false) {
         // this window's own display scale: sizes are measured in its pixels (another display may scale differently)
         val density = androidx.compose.ui.platform.LocalDensity.current.density
@@ -445,7 +454,7 @@ fun OverlayWindow(o: OverlayState, prefs: Prefs, onStop: () -> Unit) {
                 // locked: a click shows this in the bottom-right corner for a few seconds; clicking it unlocks
                 if (locked && unlock) Box(Modifier.align(Alignment.BottomEnd).padding(6.dp)
                     .background(Color(0xF526262B), RoundedCornerShape(8.dp)).clickableNoRipple { locked = false; unlock = false }
-                    .padding(horizontal = 10.dp, vertical = 6.dp)) { Text("解锁", color = Color.White, fontSize = 13.sp) }
+                    .padding(horizontal = 10.dp, vertical = 6.dp)) { Text(T("解锁", "ロック解除"), color = Color.White, fontSize = 13.sp) }
             }
             if (toolbar && !above) { Spacer(Modifier.height(gap.dp)); toolbarView() }
         }

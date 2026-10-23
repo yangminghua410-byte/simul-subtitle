@@ -1,6 +1,8 @@
-// Captures what Windows plays on the default output device (WASAPI loopback) and writes it to stdout as 16 kHz mono
-// float32 little-endian, the format the pipeline's Segmenter takes (the same as tools/mac-capture's sysaudio).
-//   sysaudio.exe [seconds]     stops after <seconds> (default: until the reader goes away or the process is ended)
+// Captures what Windows plays on the default output device (WASAPI loopback), or the default microphone with --mic,
+// and writes it to stdout as 16 kHz mono float32 little-endian, the format the pipeline's Segmenter takes (the same
+// as tools/mac-capture's sysaudio).
+//   sysaudio.exe [--mic] [seconds]    --mic: capture the default microphone; <seconds>: stop after (default: until
+//                                    the reader goes away or the process is ended)
 // Loopback delivers nothing while nothing plays: the gaps are written as silence, so that the stream keeps real time
 // and a sentence that ends with the sound still ends. A change of the default device (headphones in or out) is
 // followed. Every 5 s stderr says how much sound arrived (packets, silent ones, peak), to tell "nothing plays on this
@@ -14,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 
 static const double OUT_RATE = 16000;
@@ -71,15 +74,15 @@ struct Resampler {
     }
 };
 
-/** One loopback stream on the current default device; false when the device went away (start again). */
-static bool capture(double seconds, ULONGLONG started) {
+/** One capture stream on the current default device; false when the device went away (start again). [mic]: the default input device instead of the loopback of the output one. */
+static bool capture(double seconds, ULONGLONG started, bool mic) {
     IMMDeviceEnumerator* devices = nullptr;
     HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
                                   (void**)&devices);
     if (FAILED(hr)) fail("MMDeviceEnumerator", hr);
     IMMDevice* device = nullptr;
-    hr = devices->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-    if (FAILED(hr)) fail("GetDefaultAudioEndpoint (no output device?)", hr);
+    hr = devices->GetDefaultAudioEndpoint(mic ? eCapture : eRender, eConsole, &device);
+    if (FAILED(hr)) fail("GetDefaultAudioEndpoint (no input/output device?)", hr);
     IAudioClient* client = nullptr;
     hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
     if (FAILED(hr)) fail("IAudioClient", hr);
@@ -91,7 +94,8 @@ static bool capture(double seconds, ULONGLONG started) {
          ((WAVEFORMATEXTENSIBLE*)format)->SubFormat == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT);
     int channels = format->nChannels, bits = format->wBitsPerSample;
     if (!(isFloat && bits == 32) && !(!isFloat && (bits == 16 || bits == 32))) fail("mix format", E_FAIL);
-    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 2000000 /* 200 ms */, 0, format,
+    // the microphone stream is a plain capture (no LOOPBACK flag); loopback stays on the output device
+    hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, mic ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK, 2000000 /* 200 ms */, 0, format,
                             nullptr);
     if (FAILED(hr)) fail("IAudioClient::Initialize", hr);
     IAudioCaptureClient* cap = nullptr;
@@ -109,8 +113,8 @@ static bool capture(double seconds, ULONGLONG started) {
             WideCharToMultiByte(CP_UTF8, 0, v.pwszVal, -1, name, sizeof name, nullptr, nullptr);
         PropVariantClear(&v); props->Release();
     }
-    fprintf(stderr, "sysaudio: capturing \"%s\" %d Hz x %d (%s%d) -> 16 kHz mono\n", name, (int)rate, channels,
-            isFloat ? "float" : "int", bits);
+    fprintf(stderr, "sysaudio: %scapturing \"%s\" %d Hz x %d (%s%d) -> 16 kHz mono\n", mic ? "microphone " : "",
+            name, (int)rate, channels, isFloat ? "float" : "int", bits);
     fflush(stderr);
 
     Resampler rs(rate);
@@ -177,12 +181,16 @@ static bool capture(double seconds, ULONGLONG started) {
 }
 
 int main(int argc, char** argv) {
-    double seconds = argc > 1 ? atof(argv[1]) : 0;
+    bool mic = false; double seconds = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--mic") == 0) mic = true;
+        else seconds = atof(argv[i]);
+    }
     out = GetStdHandle(STD_OUTPUT_HANDLE);
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (FAILED(hr)) fail("CoInitializeEx", hr);
     ULONGLONG started = GetTickCount64();
-    while (!capture(seconds, started)) Sleep(200);
+    while (!capture(seconds, started, mic)) Sleep(200);
     CoUninitialize();
     return 0;
 }

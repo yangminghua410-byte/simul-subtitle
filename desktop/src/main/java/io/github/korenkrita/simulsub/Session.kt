@@ -64,8 +64,10 @@ class CaptionService private constructor(private val sysaudio: File) : SessionHo
             override fun cancel() {}
         }
         // launched and published under the hook's lock: the hook either ends this child or this sees it ran
+        // --mic makes sysaudio capture the microphone instead of what the computer plays
+        val args = if (prefs.audioSource == Prefs.SOURCE_MIC) listOf(sysaudio.path, "--mic") else listOf(sysaudio.path)
         val p = synchronized(launchLock) {
-            if (quitting) null else ProcessBuilder(sysaudio.path).redirectError(ProcessBuilder.Redirect.PIPE).start().also { child = it }
+            if (quitting) null else ProcessBuilder(args).redirectError(ProcessBuilder.Redirect.PIPE).start().also { child = it }
         } ?: return openAudio(log) // quitting now: the source that ends at once
         // its messages (permission refused, no tap) explain an early exit: keep the last ones
         val errTail = java.util.concurrent.ConcurrentLinkedDeque<String>()

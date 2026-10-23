@@ -1,7 +1,10 @@
-// Captures what the Mac plays (all processes except this one) with a Core Audio process tap (macOS 14.2+) and writes
-// it to stdout as 16 kHz mono float32 little-endian, the format the pipeline's Segmenter takes.
-//   sysaudio [seconds]     stops after <seconds> (default: until stdin closes or SIGINT/SIGTERM)
-// The first run asks for "System Audio Recording" permission (for the terminal app that started it).
+// Captures what the Mac plays (all processes except this one) with a Core Audio process tap (macOS 14.2+), or the
+// default microphone with --mic, and writes it to stdout as 16 kHz mono float32 little-endian, the format the
+// pipeline's Segmenter takes.
+//   sysaudio [--mic] [seconds]    --mic: capture the default microphone; <seconds>: stop after (default: until stdin
+//                                 closes or SIGINT/SIGTERM)
+// The first run asks for "System Audio Recording" permission (playback) or "Microphone" permission (--mic), for the
+// terminal app that started it.
 import AVFoundation
 import CoreAudio
 import Foundation
@@ -18,46 +21,71 @@ func property<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelecto
     return AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value)
 }
 
-let seconds = CommandLine.arguments.count > 1 ? Double(CommandLine.arguments[1]) : nil
+let mic = CommandLine.arguments.contains("--mic")
+let seconds: Double? = CommandLine.arguments.dropFirst().first { !$0.hasPrefix("-") }.flatMap { Double($0) }
 
-// 1. a tap on every process's output except our own (stereo mixdown, not muted for the listener)
-var ownProcess = AudioObjectID(kAudioObjectUnknown)
-var pid = getpid()
-var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
-                                         mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-var size = UInt32(MemoryLayout<AudioObjectID>.size)
-_ = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, UInt32(MemoryLayout<pid_t>.size), &pid,
-                               &size, &ownProcess)
-let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: ownProcess == kAudioObjectUnknown ? [] : [ownProcess])
-tapDescription.uuid = UUID()
-tapDescription.isPrivate = true
-tapDescription.muteBehavior = .unmuted
-var tap = AudioObjectID(kAudioObjectUnknown)
-var status = AudioHardwareCreateProcessTap(tapDescription, &tap)
-if status != noErr { fail("AudioHardwareCreateProcessTap", status) }
+// 1. the capture device: the default microphone (--mic), or a tap on every process's output except our own
+var tap = AudioObjectID(kAudioObjectUnknown) // only the playback tap; the aggregate holds it as its input
+var device = AudioObjectID(kAudioObjectUnknown)
+var isTap = false
+var status = noErr
+if mic {
+    var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device)
+    if status != noErr || device == kAudioObjectUnknown { fail("default input device", status != noErr ? status : OSStatus(-1)) }
+} else {
+    var ownProcess = AudioObjectID(kAudioObjectUnknown)
+    var pid = getpid()
+    var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+                                             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size = UInt32(MemoryLayout<AudioObjectID>.size)
+    _ = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, UInt32(MemoryLayout<pid_t>.size), &pid,
+                                   &size, &ownProcess)
+    let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: ownProcess == kAudioObjectUnknown ? [] : [ownProcess])
+    tapDescription.uuid = UUID()
+    tapDescription.isPrivate = true
+    tapDescription.muteBehavior = .unmuted
+    status = AudioHardwareCreateProcessTap(tapDescription, &tap)
+    if status != noErr { fail("AudioHardwareCreateProcessTap", status) }
 
-var format = AudioStreamBasicDescription()
-status = property(tap, kAudioTapPropertyFormat, &format)
-if status != noErr { fail("tap format", status) }
-
-// 2. a private aggregate device that has only the tap as input
-let aggregateUID = UUID().uuidString
-let description: [String: Any] = [
-    kAudioAggregateDeviceNameKey: "simul-subtitle capture",
-    kAudioAggregateDeviceUIDKey: aggregateUID,
-    kAudioAggregateDeviceIsPrivateKey: true,
-    kAudioAggregateDeviceIsStackedKey: false,
-    kAudioAggregateDeviceTapAutoStartKey: true,
-    kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: tapDescription.uuid.uuidString,
-                                       kAudioSubTapDriftCompensationKey: true]],
-]
-var aggregate = AudioObjectID(kAudioObjectUnknown)
-status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregate)
-if status != noErr { fail("AudioHardwareCreateAggregateDevice", status) }
+    // a private aggregate device that has only the tap as input
+    let aggregateUID = UUID().uuidString
+    let description: [String: Any] = [
+        kAudioAggregateDeviceNameKey: "simul-subtitle capture",
+        kAudioAggregateDeviceUIDKey: aggregateUID,
+        kAudioAggregateDeviceIsPrivateKey: true,
+        kAudioAggregateDeviceIsStackedKey: false,
+        kAudioAggregateDeviceTapAutoStartKey: true,
+        kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: tapDescription.uuid.uuidString,
+                                           kAudioSubTapDriftCompensationKey: true]],
+    ]
+    var aggregate = AudioObjectID(kAudioObjectUnknown)
+    status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregate)
+    if status != noErr { fail("AudioHardwareCreateAggregateDevice", status) }
+    device = aggregate
+    isTap = true
+}
 
 func cleanUp() {
-    AudioHardwareDestroyAggregateDevice(aggregate)
-    AudioHardwareDestroyProcessTap(tap)
+    if isTap {
+        AudioHardwareDestroyAggregateDevice(device)
+        AudioHardwareDestroyProcessTap(tap)
+    }
+}
+
+// 2. the device's stream format (the tap's format, or the microphone's input format)
+var format = AudioStreamBasicDescription()
+if mic {
+    var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamFormat,
+                                             mScope: kAudioObjectPropertyScopeInput, mElement: kAudioObjectPropertyElementMain)
+    var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    status = AudioObjectGetPropertyData(device, &address, 0, nil, &size, &format)
+    if status != noErr { fail("mic stream format", status) }
+} else {
+    status = property(tap, kAudioTapPropertyFormat, &format)
+    if status != noErr { fail("tap format", status) }
 }
 
 // 3. convert to 16 kHz mono float32 and write
@@ -68,7 +96,7 @@ else { cleanUp(); fail("audio format", -1) }
 let out = FileHandle.standardOutput
 let queue = DispatchQueue(label: "sysaudio")
 var procID: AudioDeviceIOProcID?
-status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregate, queue) { _, input, _, _, _ in
+status = AudioDeviceCreateIOProcIDWithBlock(&procID, device, queue) { _, input, _, _, _ in
     guard let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, bufferListNoCopy: input, deallocator: nil) else { return }
     let capacity = AVAudioFrameCount(Double(inBuffer.frameLength) * 16_000 / inFormat.sampleRate) + 16
     guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: capacity) else { return }
@@ -83,13 +111,13 @@ status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregate, queue) { _, inpu
     do { try out.write(contentsOf: data) } catch { cleanUp(); exit(0) } // reader gone
 }
 if status != noErr { cleanUp(); fail("AudioDeviceCreateIOProcIDWithBlock", status) }
-status = AudioDeviceStart(aggregate, procID)
+status = AudioDeviceStart(device, procID)
 if status != noErr { cleanUp(); fail("AudioDeviceStart", status) }
-FileHandle.standardError.write("sysaudio: capturing \(Int(inFormat.sampleRate)) Hz × \(inFormat.channelCount) → 16 kHz mono\n".data(using: .utf8)!)
+FileHandle.standardError.write("sysaudio: capturing \(mic ? "microphone" : "system audio") \(Int(inFormat.sampleRate)) Hz × \(inFormat.channelCount) → 16 kHz mono\n".data(using: .utf8)!)
 
 func stop() -> Never {
-    AudioDeviceStop(aggregate, procID)
-    if let procID { AudioDeviceDestroyIOProcID(aggregate, procID) }
+    AudioDeviceStop(device, procID)
+    if let procID { AudioDeviceDestroyIOProcID(device, procID) }
     cleanUp()
     exit(0)
 }

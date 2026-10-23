@@ -16,6 +16,7 @@ import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.AudioTimestamp
+import android.media.MediaRecorder
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Handler
@@ -56,21 +57,29 @@ class CaptionService : Service(), SessionHost {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) { stopSelf(); return START_NOT_STICKY }
         // the home screen's and the notification's 暂停/继续; a service started only for it has nothing to pause
-        if (intent?.action == ACTION_PAUSE) { if (projection != null) togglePause() else stopSelf(); return START_NOT_STICKY }
-        if (projection != null) return START_NOT_STICKY
+        if (intent?.action == ACTION_PAUSE) { if (running) togglePause() else stopSelf(); return START_NOT_STICKY }
+        if (running) return START_NOT_STICKY
 
-        startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         registerReceiver(screenOn, android.content.IntentFilter(Intent.ACTION_SCREEN_ON))
-        @Suppress("DEPRECATION")
-        val data: Intent? = intent?.getParcelableExtra(EXTRA_DATA)
-        val code = intent?.getIntExtra(EXTRA_CODE, 0) ?: 0
-        if (data == null) { stopSelf(); return START_NOT_STICKY }
-        val mpm = getSystemService(MediaProjectionManager::class.java)
-        val p = mpm.getMediaProjection(code, data) ?: run { stopSelf(); return START_NOT_STICKY }
-        p.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() { stopSelf() } // user revoked sharing
-        }, main)
-        projection = p
+        val mic = intent?.getBooleanExtra(EXTRA_MIC, false) == true
+        if (mic) {
+            // Microphone mode: no screen sharing / projection needed, but Android 14+ needs the mic foreground type.
+            startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            // become a media-projection foreground service before creating the projection, or the projection can
+            // fail to create on Android 14+ (the service must be foreground first)
+            startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            @Suppress("DEPRECATION")
+            val data: Intent? = intent?.getParcelableExtra(EXTRA_DATA)
+            val code = intent?.getIntExtra(EXTRA_CODE, 0) ?: 0
+            if (data == null) { stopSelf(); return START_NOT_STICKY }
+            val mpm = getSystemService(MediaProjectionManager::class.java)
+            val p = mpm.getMediaProjection(code, data) ?: run { stopSelf(); return START_NOT_STICKY }
+            p.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() { stopSelf() } // user revoked sharing
+            }, main)
+            projection = p
+        }
         running = true
         showOverlay()
         session.start()
@@ -104,8 +113,43 @@ class CaptionService : Service(), SessionHost {
         }
     }
 
+    override fun openAudio(log: SessionLog?): AudioSource =
+        if (prefs.audioSource == SOURCE_MIC) openMic() else openPlayback()
+
+    /** Shared non-blocking reader for both capture modes: 16 kHz mono PCM-float frames with HAL capture timestamps. */
+    private fun recSource(rec: AudioRecord): AudioSource = object : AudioSource {
+        @Volatile private var cancelled = false
+        private val ts = AudioTimestamp()
+        private var framesRead = 0L
+        override var estimated = true; private set
+        // Non-blocking reads: cancel is only a flag, so the main thread never touches AudioRecord and the
+        // session thread is the only one that calls stop()/release().
+        override fun read(frame: FloatArray): Long {
+            var off = 0
+            while (off < frame.size) {
+                if (cancelled) return -1
+                val n = rec.read(frame, off, frame.size - off, AudioRecord.READ_NON_BLOCKING)
+                check(n >= 0) { "读取音频失败 ($n)" }
+                if (n == 0) Thread.sleep(10)
+                off += n
+            }
+            framesRead += frame.size
+            // Capture time of this frame's last sample, from the HAL timestamp when available,
+            // so time spent waiting in the AudioRecord buffer counts as latency.
+            val hal = rec.getTimestamp(ts, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS
+            estimated = !hal
+            return if (hal) (ts.nanoTime + (framesRead - ts.framePosition) * 1_000_000_000L / 16_000) / 1_000_000
+            else monoMs() // read time: underestimates latency by the time spent in the AudioRecord buffer
+        }
+        // neither capture mode ends by itself: playback ends only when the user stops sharing (service stops);
+        // the microphone records until the user stops it
+        override fun endReason(): String? = null
+        override fun close() { runCatching { rec.stop() }; rec.release() }
+        override fun cancel() { cancelled = true }
+    }
+
     @SuppressLint("MissingPermission") // checked in MainActivity
-    override fun openAudio(log: SessionLog?): AudioSource {
+    private fun openPlayback(): AudioSource {
         val p = projection ?: error("屏幕共享已结束")
         val cfg = AudioPlaybackCaptureConfiguration.Builder(p)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -128,35 +172,32 @@ class CaptionService : Service(), SessionHost {
             rec.startRecording()
             check(rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "无法开始录音（可能被其他 App 占用）" }
         } catch (e: Throwable) { rec.release(); throw e }
-        return object : AudioSource {
-            @Volatile private var cancelled = false
-            private val ts = AudioTimestamp()
-            private var framesRead = 0L
-            override var estimated = true; private set
-            // Non-blocking reads: cancel is only a flag, so the main thread never touches AudioRecord and the
-            // session thread is the only one that calls stop()/release().
-            override fun read(frame: FloatArray): Long {
-                var off = 0
-                while (off < frame.size) {
-                    if (cancelled) return -1
-                    val n = rec.read(frame, off, frame.size - off, AudioRecord.READ_NON_BLOCKING)
-                    check(n >= 0) { "读取音频失败 ($n)" }
-                    if (n == 0) Thread.sleep(10)
-                    off += n
-                }
-                framesRead += frame.size
-                // Capture time of this frame's last sample, from the HAL timestamp when available,
-                // so time spent waiting in the AudioRecord buffer counts as latency.
-                val hal = rec.getTimestamp(ts, AudioTimestamp.TIMEBASE_MONOTONIC) == AudioRecord.SUCCESS
-                estimated = !hal
-                return if (hal) (ts.nanoTime + (framesRead - ts.framePosition) * 1_000_000_000L / 16_000) / 1_000_000
-                else monoMs() // read time: underestimates latency by the time spent in the AudioRecord buffer
-            }
-            // playback capture does not end by itself: the user ends sharing, and the service stops
-            override fun endReason(): String? = null
-            override fun close() { runCatching { rec.stop() }; rec.release() }
-            override fun cancel() { cancelled = true }
-        }
+        return recSource(rec)
+    }
+
+    /**
+     * Microphone input for speech-to-subtitle: same 16 kHz mono PCM-float format as playback capture, but reads the
+     * device microphone (VOICE_RECOGNITION keeps the audio clean of AGC/NS for ASR). No projection needed.
+     */
+    @SuppressLint("MissingPermission") // checked in MainActivity
+    private fun openMic(): AudioSource {
+        val fmt = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+            .setSampleRate(16_000)
+            .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+            .build()
+        val minBuf = AudioRecord.getMinBufferSize(16_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_FLOAT)
+        val rec = AudioRecord.Builder()
+            .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            .setAudioFormat(fmt)
+            .setBufferSizeInBytes(maxOf(minBuf, 16_000 * 4 * 2)) // 2 s of slack
+            .build()
+        try {
+            check(rec.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord 初始化失败" }
+            rec.startRecording()
+            check(rec.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "无法开始录音（麦克风可能被其他 App 占用）" }
+        } catch (e: Throwable) { rec.release(); throw e }
+        return recSource(rec)
     }
 
     override fun show(lines: List<CaptionLine>, diag: String?, mtLight: ServiceStatus.Light, jevLight: ServiceStatus.Light,
@@ -404,6 +445,11 @@ class CaptionService : Service(), SessionHost {
         const val ACTION_STOP = "stop"
         /** flips the running session's pause */
         const val ACTION_PAUSE = "pause"
+        /** Extra flag: true = capture from the microphone (no projection); absent/false = playback capture. */
+        const val EXTRA_MIC = "mic"
+        /** Audio-source choice in [Prefs.audioSource]. */
+        const val SOURCE_PLAYBACK = "playback"
+        const val SOURCE_MIC = "mic"
         /** captions never take more than this part of the usable height, so the toolbar always fits */
         const val MAX_CAPTION_FRAC = 0.4f
 
@@ -421,6 +467,11 @@ class CaptionService : Service(), SessionHost {
             ctx.startForegroundService(
                 Intent(ctx, CaptionService::class.java).putExtra(EXTRA_CODE, code).putExtra(EXTRA_DATA, data),
             )
+        }
+
+        /** Start a microphone captioning session: no projection needed, just RECORD_AUDIO + overlay. */
+        fun startMic(ctx: Context) {
+            ctx.startForegroundService(Intent(ctx, CaptionService::class.java).putExtra(EXTRA_MIC, true))
         }
 
         fun togglePause(ctx: Context) {

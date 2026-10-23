@@ -214,6 +214,20 @@ class MainActivity : Activity() {
             else "视频里说的语言 → 字幕的语言。知道是哪种语言就选上，翻译会更准。"
     }
 
+    /** The home card's input choice: system/app audio (playback capture) or the microphone (speech to subtitle). */
+    private fun renderSource() {
+        val box = findViewById<LinearLayout>(R.id.sourceBox)
+        box.removeAllViews()
+        val g = choice(listOf(
+            CaptionService.SOURCE_PLAYBACK to "播放的声音",
+            CaptionService.SOURCE_MIC to "麦克风",
+        ), prefs.audioSource) { v ->
+            if (prefs.audioSource != v) { prefs.audioSource = v; renderPermissions(); render() }
+        }
+        g.contentDescription = "字幕听什么声音"
+        box.addView(g, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+    }
+
     /** 其他（自己填）: a language name typed in, saved with 确定; cancel or a blank name keeps the language in use. */
     private fun askTargetName() {
         val now = prefs.targetLang.takeIf { it.lang == null }?.name ?: ""
@@ -452,6 +466,7 @@ class MainActivity : Activity() {
         super.onResume()
         loadStyle() // the overlay toolbar may have changed size / opacity / mode meanwhile (no listener while paused)
         renderLang()
+        renderSource()
         syncMode()
         prefs.listen(styleListener)
         renderPermissions()
@@ -501,6 +516,8 @@ class MainActivity : Activity() {
         progress.visibility = View.GONE
         secondary.visibility = View.GONE
         primary.isEnabled = true
+        // the input choice matters only before a session starts; while running it would mislead (the source is already open)
+        findViewById<View>(R.id.sourceBox).visibility = if (CaptionService.running) View.GONE else View.VISIBLE
         if (CaptionService.running) {
             val paused = CaptionService.paused
             if (paused) status(R.color.warn, "字幕已暂停", "声音不再识别，字幕窗口保留。点「继续字幕」接着出字幕。")
@@ -516,7 +533,9 @@ class MainActivity : Activity() {
             primary.setOnClickListener { CaptionService.stop(this); main.postDelayed({ render() }, 300) }
         } else {
             val missingPerm = !hasAudio() || !Settings.canDrawOverlays(this)
-            val hint = if (missingPerm) "点下面的按钮，按提示允许下方两项，就能开始。" else "点下面的按钮，再在弹出的窗口里选你要看的 App。"
+            val hint = if (missingPerm) "点下面的按钮，按提示允许下方两项，就能开始。"
+                else if (prefs.audioSource == CaptionService.SOURCE_MIC) "点下面的按钮，对着麦克风说话，就会实时变成字幕。"
+                else "点下面的按钮，再在弹出的窗口里选你要看的 App。"
             renderService()
             if (!prefs.byokReady) {
                 // nothing else to set up: without an LLM API there is nothing to start, so the one action goes there
@@ -564,7 +583,9 @@ class MainActivity : Activity() {
         // the home page shows this card only while something required is missing; after that it is just noise
         findViewById<View>(R.id.permCard).visibility =
             if (hasAudio() && Settings.canDrawOverlays(this)) View.GONE else View.VISIBLE
-        permRow("① 听手机里播放的声音", "只听 App 播放出来的声音，不用麦克风", hasAudio(), permList) {
+        permRow(if (prefs.audioSource == CaptionService.SOURCE_MIC) "① 使用麦克风" else "① 听手机里播放的声音",
+            if (prefs.audioSource == CaptionService.SOURCE_MIC) "把你说的话实时识别成字幕"
+            else "只听 App 播放出来的声音，不用麦克风", hasAudio(), permList) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_PERM_ONLY)
         }
         permRow("② 在屏幕上显示字幕", "让字幕浮在其他 App 上面", Settings.canDrawOverlays(this), permList) {
@@ -1565,6 +1586,16 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             return
         }
+        if (prefs.audioSource == CaptionService.SOURCE_MIC) {
+            // microphone mode: no app picker, just start (RECORD_AUDIO already granted)
+            try {
+                CaptionService.startMic(this)
+            } catch (e: android.app.ForegroundServiceStartNotAllowedException) {
+                startRefused = true; render(); return
+            }
+            moveTaskToBack(true)
+            return
+        }
         val mpm = getSystemService(MediaProjectionManager::class.java)
         startActivityForResult(mpm.createScreenCaptureIntent(), REQ_PROJECTION)
     }
@@ -1573,7 +1604,13 @@ class MainActivity : Activity() {
         renderPermissions()
         render()
         if (requestCode == REQ_START && hasAudio()) start()
-        else if (requestCode == REQ_START) status(R.color.err, "需要允许「听手机里播放的声音」", "只用来听 App 播放出来的声音，不会用麦克风。请再点一次开始，并选择「允许」。")
+        else if (requestCode == REQ_START) {
+            val mic = prefs.audioSource == CaptionService.SOURCE_MIC
+            status(R.color.err,
+                if (mic) "需要允许「使用麦克风」" else "需要允许「听手机里播放的声音」",
+                if (mic) "麦克风权限用来把你说的话实时识别成字幕。请再点一次开始，并选择「允许」。"
+                else "只用来听 App 播放出来的声音，不会用麦克风。请再点一次开始，并选择「允许」。")
+        }
     }
 
     @Deprecated("Deprecated in Java")

@@ -54,6 +54,10 @@ class Prefs internal constructor(private val file: File) : SessionPrefs {
     /** page colours: "system", "light" or "dark" */
     var theme: String get() = str("theme") ?: "system"; set(v) = put("theme" to v)
     var palette: String get() = str("palette") ?: PALETTES[0].id; set(v) = put("palette" to v)
+    /** Audio input: SOURCE_PLAYBACK (system/app audio) or SOURCE_MIC (microphone). Read when a session starts. */
+    var audioSource: String get() = str("audioSource") ?: SOURCE_PLAYBACK; set(v) = put("audioSource" to v)
+    /** UI language: LANG_ZH (中文) or LANG_JA (日本語). Read when an interface string is shown. */
+    var lang: String get() = str("lang") ?: LANG_ZH; set(v) = put("lang" to v)
     /** caption card width as a part of the screen width */
     var widthFrac: Float get() = float("widthFrac", DEFAULT_WIDTH); set(v) = put("widthFrac" to v)
     /** caption area height as a part of the screen height; 0 = follows the content */
@@ -207,6 +211,12 @@ class Prefs internal constructor(private val file: File) : SessionPrefs {
         // 0.40 on the phone; a desk screen has room for a narrower card (about 300 points on a 1512-wide display)
         const val MIN_WIDTH = 0.20f
         const val DEFAULT_ALPHA = 0.78f
+        /** Audio-source choice in [audioSource]. */
+        const val SOURCE_PLAYBACK = "playback"
+        const val SOURCE_MIC = "mic"
+        /** Interface language in [lang]. */
+        const val LANG_ZH = "zh"
+        const val LANG_JA = "ja"
         val prefs by lazy { Prefs(File(dataDir, "settings.json")) }
     }
 }

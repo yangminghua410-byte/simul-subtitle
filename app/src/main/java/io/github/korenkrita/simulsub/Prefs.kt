@@ -31,6 +31,11 @@ class Prefs(ctx: Context) : SessionPrefs {
         get() = sp.getString("palette", CaptionOverlayView.PALETTES[0].id)!!
         set(v) = sp.edit().putString("palette", v).apply()
 
+    /** Audio input: CaptionService.SOURCE_PLAYBACK (system/app audio) or SOURCE_MIC (microphone). Read when a session starts. */
+    var audioSource: String
+        get() = sp.getString("audioSource", CaptionService.SOURCE_PLAYBACK)!!
+        set(v) = sp.edit().putString("audioSource", v).apply()
+
     /** Overlay width as a fraction of the screen width */
     var widthFrac: Float
         get() = sp.getFloat("widthFrac", DEFAULT_WIDTH)

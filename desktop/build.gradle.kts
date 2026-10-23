@@ -78,6 +78,8 @@ compose.desktop {
                     extraKeysRawXml = """
                         <key>NSAudioCaptureUsageDescription</key>
                         <string>同传字幕要听这台 Mac 播放的声音，才能把它变成字幕。声音只在电脑上识别，不会上传。</string>
+                        <key>NSMicrophoneUsageDescription</key>
+                        <string>同传字幕要用麦克风听你说话，才能把它翻译成字幕。声音只在电脑上识别，不会上传。</string>
                         <key>CFBundleDisplayName</key>
                         <string>同传字幕</string>
                     """.trimIndent()
